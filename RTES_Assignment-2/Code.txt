@@ -1,0 +1,226 @@
+/* STM32F407 TIM2 scheduler with EXTI0 button interrupt and mutex protection
+   - TIM2 interrupt (priority 1) runs slow/fast LED blink modes
+   - EXTI0 interrupt (priority 0) triggers emergency mode on button press
+   - Mutex protects LED access to prevent higher priority interrupt during critical section
+*/
+
+#include "stm32f4xx.h"
+
+/* Global millisecond counter (incremented by SysTick) */
+volatile uint32_t msTicks = 0;
+
+/* Mode toggle variable: 0 -> slow, 1 -> fast */
+volatile uint8_t sched_mode = 0;
+
+/* Emergency mode flag: toggled by button press */
+volatile uint8_t emergency_mode = 0;
+
+/* Mutex flag: 1 = locked (critical section active), 0 = unlocked */
+volatile uint8_t led_mutex = 0;
+
+/* Forward declarations */
+void delay_ms(uint32_t ms);
+void LEDs_on(void);
+void LEDs_off(void);
+void blink_mode(uint32_t on_ms, uint32_t off_ms, uint32_t repeats);
+void GPIO_Init_PD12_15(void);
+void TIM2_Init_1Hz(void);
+void SysTick_Init_1ms(void);
+void EXTI0_Init(void);
+
+/* Mutex lock function */
+void mutex_lock(void) {
+    led_mutex = 1;
+    __DSB(); // Data Synchronization Barrier
+}
+
+/* Mutex unlock function */
+void mutex_unlock(void) {
+    __DSB(); // Data Synchronization Barrier
+    led_mutex = 0;
+}
+
+/* SysTick handler increments ms counter */
+void SysTick_Handler(void) {
+    msTicks++;
+}
+
+/* Simple millisecond delay using SysTick */
+void delay_ms(uint32_t ms) {
+    uint32_t target = msTicks + ms;
+    while(msTicks < target) {
+        __NOP();
+    }
+}
+
+/* Turn on PD12..PD15 */
+void LEDs_on(void) {
+    GPIOD->BSRR = (1U<<12) | (1U<<13) | (1U<<14) | (1U<<15);
+}
+
+/* Turn off PD12..PD15 */
+void LEDs_off(void) {
+    GPIOD->BSRR = ((1U<<12) | (1U<<13) | (1U<<14) | (1U<<15)) << 16;
+}
+
+/* Blink all 4 LEDs with mutex protection */
+void blink_mode(uint32_t on_ms, uint32_t off_ms, uint32_t repeats) {
+    for(uint32_t i=0; i<repeats; ++i) {
+        mutex_lock();
+        LEDs_on();
+        mutex_unlock();
+        delay_ms(on_ms);
+        
+        mutex_lock();
+        LEDs_off();
+        mutex_unlock();
+        delay_ms(off_ms);
+    }
+}
+
+/* Initialize GPIOD pins 12..15 as outputs */
+void GPIO_Init_PD12_15(void) {
+    RCC->AHB1ENR |= RCC_AHB1ENR_GPIODEN;
+    volatile uint32_t tmp = RCC->AHB1ENR;
+    (void)tmp;
+
+    GPIOD->MODER &= ~((3U << (12*2)) | (3U << (13*2)) | (3U << (14*2)) | (3U << (15*2)));
+    GPIOD->MODER |= ((1U << (12*2)) | (1U << (13*2)) | (1U << (14*2)) | (1U << (15*2)));
+    
+    GPIOD->OTYPER &= ~((1U<<12) | (1U<<13) | (1U<<14) | (1U<<15));
+    GPIOD->OSPEEDR |= ((2U << (12*2)) | (2U << (13*2)) | (2U << (14*2)) | (2U << (15*2)));
+    GPIOD->PUPDR &= ~((3U << (12*2)) | (3U << (13*2)) | (3U << (14*2)) | (3U << (15*2)));
+}
+
+/* Initialize EXTI0 for PA0 button (rising edge) */
+void EXTI0_Init(void) {
+    /* Enable GPIOA clock */
+    RCC->AHB1ENR |= RCC_AHB1ENR_GPIOAEN;
+    
+    /* Configure PA0 as input */
+    GPIOA->MODER &= ~(3U << (0*2)); // Input mode
+    GPIOA->PUPDR &= ~(3U << (0*2)); // No pull-up/down (external pull-down on board)
+    
+    /* Enable SYSCFG clock for EXTI configuration */
+    RCC->APB2ENR |= RCC_APB2ENR_SYSCFGEN;
+    
+    /* Connect EXTI0 to PA0 */
+    SYSCFG->EXTICR[0] &= ~SYSCFG_EXTICR1_EXTI0;
+    SYSCFG->EXTICR[0] |= SYSCFG_EXTICR1_EXTI0_PA;
+    
+    /* Configure EXTI0: rising edge trigger */
+    EXTI->RTSR |= EXTI_RTSR_TR0;  // Rising edge
+    EXTI->FTSR &= ~EXTI_FTSR_TR0; // Not falling edge
+    
+    /* Unmask EXTI0 */
+    EXTI->IMR |= EXTI_IMR_MR0;
+    
+    /* Set EXTI0 priority to 0 (highest) and enable */
+    NVIC_SetPriority(EXTI0_IRQn, 0);
+    NVIC_EnableIRQ(EXTI0_IRQn);
+}
+
+/* TIM2 init to generate update event at 1 Hz */
+void TIM2_Init_1Hz(void) {
+    RCC->APB1ENR |= RCC_APB1ENR_TIM2EN;
+    volatile uint32_t tmp = RCC->APB1ENR;
+    (void)tmp;
+
+    TIM2->CR1 = 0;
+    TIM2->PSC = 8399U;
+    TIM2->ARR = 9999U;
+    TIM2->SR = 0;
+    TIM2->DIER |= TIM_DIER_UIE;
+
+    /* Set TIM2 priority to 1 (lower than EXTI0) */
+    NVIC_SetPriority(TIM2_IRQn, 1);
+    NVIC_EnableIRQ(TIM2_IRQn);
+
+    TIM2->CR1 |= TIM_CR1_CEN;
+}
+
+/* TIM2 IRQ handler: scheduler runs slow/fast modes */
+void TIM2_IRQHandler(void) {
+    if (TIM2->SR & TIM_SR_UIF) {
+        TIM2->SR &= ~TIM_SR_UIF;
+        
+        /* Only run scheduled tasks if NOT in emergency mode */
+        if (!emergency_mode) {
+            if (sched_mode == 0) {
+                /* Slow mode: 200ms on/off, 2 repeats */
+                blink_mode(200, 200, 2);
+                sched_mode = 1;
+            } else {
+                /* Fast mode: 100ms on/off, 2 repeats */
+                blink_mode(100, 100, 2);
+                sched_mode = 0;
+            }
+        }
+    }
+}
+
+/* EXTI0 IRQ handler: button press toggles emergency mode */
+void EXTI0_IRQHandler(void) {
+    /* Check if EXTI0 triggered */
+    if (EXTI->PR & EXTI_PR_PR0) {
+        /* Clear pending bit */
+        EXTI->PR = EXTI_PR_PR0;
+        
+        /* Simple debounce delay */
+        delay_ms(50);
+        
+        /* Check if mutex is locked (critical section active) */
+        if (led_mutex == 0) {
+            /* Mutex unlocked - safe to toggle emergency mode */
+            emergency_mode = !emergency_mode;
+            
+            /* If entering emergency mode, start blinking immediately */
+            if (emergency_mode) {
+                /* Emergency blink: 1 sec on, 1 sec off continuously */
+                while (emergency_mode) {
+                    mutex_lock();
+                    LEDs_on();
+                    mutex_unlock();
+                    delay_ms(1000);
+                    
+                    mutex_lock();
+                    LEDs_off();
+                    mutex_unlock();
+                    delay_ms(1000);
+                }
+            }
+        }
+        /* If mutex locked, ignore button press - critical section is active */
+    }
+}
+
+/* Initialize SysTick for 1 ms ticks */
+void SysTick_Init_1ms(void) {
+    if (SysTick_Config(SystemCoreClock / 1000U) != 0) {
+        while (1) {
+            __NOP();
+        }
+    }
+    NVIC_SetPriority(SysTick_IRQn, 2);
+}
+
+/* main */
+int main(void) {
+    /* Initialize SysTick */
+    SysTick_Init_1ms();
+    
+    /* Initialize LEDs */
+    GPIO_Init_PD12_15();
+    LEDs_off();
+    
+    /* Initialize EXTI0 for button */
+    EXTI0_Init();
+    
+    /* Initialize TIM2 scheduler */
+    TIM2_Init_1Hz();
+    
+    /* Main loop - idle state */
+    while (1) {
+        __WFI(); /* Wait for interrupt - low power */
+    }
+}
