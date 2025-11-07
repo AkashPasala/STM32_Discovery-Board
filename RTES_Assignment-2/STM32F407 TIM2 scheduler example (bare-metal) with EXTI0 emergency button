@@ -6,6 +6,7 @@
    - A simple mutex (led_mutex) protects LEDs so scheduler can't be interrupted
      by EXTI0 while it is executing. TIM2 disables EXTI0 during its critical section.
    - When emergency_mode is active TIM2 IRQ is disabled and main loop blinks LEDs.
+(chat gpt)
 */
 
 #include "stm32f4xx.h"   // CMSIS device header
