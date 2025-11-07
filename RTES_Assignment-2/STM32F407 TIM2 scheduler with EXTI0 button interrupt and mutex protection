@@ -2,6 +2,7 @@
    - TIM2 interrupt (priority 1) runs slow/fast LED blink modes
    - EXTI0 interrupt (priority 0) triggers emergency mode on button press
    - Mutex protects LED access to prevent higher priority interrupt during critical section
+(CHAT GPT)
 */
 
 #include "stm32f4xx.h"
@@ -224,3 +225,4 @@ int main(void) {
         __WFI(); /* Wait for interrupt - low power */
     }
 }
+
