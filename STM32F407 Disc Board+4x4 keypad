@@ -1,3 +1,9 @@
+ 
+/* =============================================
+    Make not that PORT E and PORT A working PORT D is not working
+   ============================================= */
+
+
 #include "stm32f4xx.h"
 #include <string.h>
 
@@ -101,8 +107,6 @@ void System_Init(void)
 }
 
 /* =============================================
-   Make not that PORT E and PORT A working PORT D is not working
-
     SCAN 4x4 KEYPAD ON PORT E
    ============================================= */
 char Scan_Keypad(void)
