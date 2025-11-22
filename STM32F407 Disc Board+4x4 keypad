@@ -1,0 +1,140 @@
+#include "stm32f4xx.h"
+#include <string.h>
+
+/* =============================================
+   WATCH WINDOW VARIABLE
+   ============================================= */
+volatile char Global_Pressed_Key = 0;
+
+/* =============================================
+   KEYPAD PIN MAPPING (NOW ON PORT E)
+   ============================================= */
+// Row 0-3 = PE7, PE8, PE9, PE10  (Outputs)
+// Col 0-3 = PE11, PE12, PE13, PE14 (Inputs with Pull-up)
+char keyMap[4][4] = {
+    {'1', '2', '3', 'A'},
+    {'4', '5', '6', 'B'},
+    {'7', '8', '9', 'C'},
+    {'*', '0', '#', 'D'}
+};
+
+const char secretPIN[] = "123A";
+char inputBuf[5] = {0};
+int bufIdx = 0;
+
+/* Prototypes */
+void System_Init(void);
+void Delay_Rough(volatile int count);
+char Scan_Keypad(void);
+
+/* =============================================
+   MAIN PROGRAM
+   ============================================= */
+int main(void)
+{
+    System_Init();
+
+    while(1)
+    {
+        char key = Scan_Keypad();
+
+        if(key != 0)
+        {
+            Global_Pressed_Key = key;
+            inputBuf[bufIdx++] = key;
+
+            Delay_Rough(100000);
+
+            if(bufIdx >= 4)
+            {
+                if(strncmp(inputBuf, secretPIN, 4) == 0)
+                {
+                    GPIOD->ODR |= (1 << 12);
+                    Delay_Rough(500000);
+                    GPIOD->ODR &= ~(1 << 12);
+                }
+                else
+                {
+                    for(int i=0;i<6;i++)
+                    {
+                        GPIOD->ODR ^= (1 << 12);
+                        Delay_Rough(300000);
+                    }
+                    GPIOD->ODR &= ~(1 << 12);
+                }
+
+                bufIdx = 0;
+                memset(inputBuf, 0, sizeof(inputBuf));
+            }
+        }
+    }
+}
+
+/* =============================================
+   GPIO CONFIGURATION
+   ============================================= */
+void System_Init(void)
+{
+    /* Enable clocks for GPIOE and GPIOD */
+    RCC->AHB1ENR |= (1 << 4);   // GPIOE
+    RCC->AHB1ENR |= (1 << 3);   // GPIOD (LED)
+
+    /* Configure LED PD12 as output */
+    GPIOD->MODER &= ~(3 << (12 * 2));
+    GPIOD->MODER |=  (1 << (12 * 2));
+
+    /* Configure ROWS PE7–PE10 (OUTPUTS) */
+    for(int pin = 7; pin <= 10; pin++)
+    {
+        GPIOE->MODER &= ~(3 << (pin * 2));
+        GPIOE->MODER |=  (1 << (pin * 2));   // Output mode
+        GPIOE->ODR   |=  (1 << pin);         // Set HIGH initially
+    }
+
+    /* Configure COLS PE11–PE14 (INPUT PULL-UP) */
+    for(int pin = 11; pin <= 14; pin++)
+    {
+        GPIOE->MODER &= ~(3 << (pin * 2));   // Input
+        GPIOE->PUPDR &= ~(3 << (pin * 2));   // Clear
+        GPIOE->PUPDR |=  (1 << (pin * 2));   // Pull-up
+    }
+}
+
+/* =============================================
+   Make not that PORT E and PORT A working PORT D is not working
+
+    SCAN 4x4 KEYPAD ON PORT E
+   ============================================= */
+char Scan_Keypad(void)
+{
+    for(int r = 0; r < 4; r++)
+    {
+        /* Set PE7–PE10 HIGH */
+        GPIOE->ODR |= (1<<7)|(1<<8)|(1<<9)|(1<<10);
+
+        /* Activate ONE row at a time (active LOW) */
+        GPIOE->ODR &= ~(1 << (7 + r));
+
+        /* Check cols PE11–PE14 */
+        for(int c = 0; c < 4; c++)
+        {
+            int colPin = 11 + c;
+
+            if(!(GPIOE->IDR & (1 << colPin)))
+            {
+                while(!(GPIOE->IDR & (1 << colPin))); // Wait release
+                return keyMap[r][c];
+            }
+        }
+    }
+
+    return 0;
+}
+
+/* =============================================
+   SOFTWARE DELAY
+   ============================================= */
+void Delay_Rough(volatile int count)
+{
+    while(count--) { __NOP(); }
+}
